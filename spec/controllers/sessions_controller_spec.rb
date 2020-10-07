@@ -61,13 +61,21 @@ describe SessionsController, type: :controller do
 
       expect(response).to render_template(:ldap_signin)
     end
+
+    it "redirects user to main room if already signed in" do
+      user = create(:user)
+      @request.session[:user_id] = user.id
+
+      post :signin
+      expect(response).to redirect_to(room_path(user.main_room))
+    end
   end
 
   describe "GET #destroy" do
     before(:each) do
       user = create(:user, provider: "greenlight")
       @request.session[:user_id] = user.id
-      get :destroy
+      post :destroy
     end
 
     it "should logout user" do
@@ -80,7 +88,11 @@ describe SessionsController, type: :controller do
   end
 
   describe "POST #create" do
-    before { allow(Rails.configuration).to receive(:enable_email_verification).and_return(true) }
+    before do
+      allow(Rails.configuration).to receive(:enable_email_verification).and_return(true)
+      allow_any_instance_of(SessionsController).to receive(:auth_changed_to_local?).and_return(false)
+    end
+
     before(:each) do
       @user1 = create(:user, provider: 'greenlight', password: 'example', password_confirmation: 'example')
       @user2 = create(:user, password: 'example', password_confirmation: "example")
@@ -131,7 +143,28 @@ describe SessionsController, type: :controller do
       }
 
       expect(@request.session[:user_id]).to be_nil
-      expect(response).to redirect_to(account_activation_path(email: @user3.email))
+      # Expect to redirect to activation path since token is not known here
+      expect(response.location.start_with?(account_activation_url(digest: @user3.activation_digest))).to be true
+    end
+
+    it "should not login user if account is deleted" do
+      user = create(:user, provider: "greenlight",
+        password: "example", password_confirmation: 'example')
+
+      user.delete
+      user.reload
+      expect(user.deleted?).to be true
+
+      post :create, params: {
+        session: {
+          email: user.email,
+          password: 'example',
+        },
+      }
+
+      expect(@request.session[:user_id]).to be_nil
+      expect(flash[:alert]).to eq(I18n.t("registration.banned.fail"))
+      expect(response).to redirect_to(root_path)
     end
 
     it "redirects the user to the page they clicked sign in from" do
@@ -188,7 +221,7 @@ describe SessionsController, type: :controller do
     it "redirects to the admins page for admins" do
       user = create(:user, provider: "greenlight",
         password: "example", password_confirmation: 'example')
-      user.add_role :super_admin
+      user.set_role :super_admin
 
       post :create, params: {
         session: {
@@ -202,7 +235,7 @@ describe SessionsController, type: :controller do
     end
 
     it "should migrate old rooms from the twitter account to the new user" do
-      twitter_user = User.create(name: "Twitter User", email: "user@twitter.com", image: "example.png",
+      twitter_user = create(:user, name: "Twitter User", email: "user@twitter.com", image: "example.png",
         username: "twitteruser", email_verified: true, provider: 'twitter', social_uid: "twitter-user")
 
       room = Room.new(name: "Test")
@@ -222,6 +255,22 @@ describe SessionsController, type: :controller do
       expect(@user1.rooms.count).to eq(3)
       expect(@user1.rooms.find { |r| r.name == "Old Home Room" }).to_not be_nil
       expect(@user1.rooms.find { |r| r.name == "Test" }).to_not be_nil
+    end
+
+    it "sends the user a reset password email if the authentication method is changing to local" do
+      allow_any_instance_of(SessionsController).to receive(:auth_changed_to_local?).and_return(true)
+      email = Faker::Internet.email
+
+      create(:user, email: email, provider: "greenlight", social_uid: "google-user")
+
+      expect {
+        post :create, params: {
+          session: {
+            email: email,
+            password: 'example',
+          },
+        }
+      }.to change { ActionMailer::Base.deliveries.count }.by(1)
     end
   end
 
@@ -289,6 +338,27 @@ describe SessionsController, type: :controller do
       expect(@request.session[:user_id]).to eql(u.id)
     end
 
+    it "redirects a deleted user to the root page" do
+      # Create the user first
+      request.env["omniauth.auth"] = OmniAuth.config.mock_auth[:bn_launcher]
+      get :omniauth, params: { provider: 'bn_launcher' }
+
+      # Delete the user
+      user = User.find_by(social_uid: "bn-launcher-user")
+
+      @request.session[:user_id] = nil
+      user.delete
+      user.reload
+      expect(user.deleted?).to be true
+
+      # Try to sign back in
+      get :omniauth, params: { provider: 'bn_launcher' }
+
+      expect(@request.session[:user_id]).to be_nil
+      expect(flash[:alert]).to eq(I18n.t("registration.banned.fail"))
+      expect(response).to redirect_to(root_path)
+    end
+
     it "should redirect to root on invalid omniauth login" do
       request.env["omniauth.auth"] = :invalid_credentials
       get :omniauth, params: { provider: :google }
@@ -313,7 +383,7 @@ describe SessionsController, type: :controller do
 
       it "should notify twitter users that twitter is deprecated" do
         allow(Rails.configuration).to receive(:allow_user_signup).and_return(true)
-        twitter_user = User.create(name: "Twitter User", email: "user@twitter.com", image: "example.png",
+        twitter_user = create(:user, name: "Twitter User", email: "user@twitter.com", image: "example.png",
           username: "twitteruser", email_verified: true, provider: 'twitter', social_uid: "twitter-user")
 
         request.env["omniauth.auth"] = OmniAuth.config.mock_auth[:twitter]
@@ -324,7 +394,7 @@ describe SessionsController, type: :controller do
       end
 
       it "should migrate rooms from the twitter account to the google account" do
-        twitter_user = User.create(name: "Twitter User", email: "user@twitter.com", image: "example.png",
+        twitter_user = create(:user, name: "Twitter User", email: "user@twitter.com", image: "example.png",
           username: "twitteruser", email_verified: true, provider: 'twitter', social_uid: "twitter-user")
 
         room = Room.new(name: "Test")
@@ -349,7 +419,7 @@ describe SessionsController, type: :controller do
         allow(Rails.configuration).to receive(:enable_email_verification).and_return(true)
         @user = create(:user, provider: "greenlight")
         @admin = create(:user, provider: "greenlight", email: "test@example.com")
-        @admin.add_role :admin
+        @admin.set_role :admin
       end
 
       it "should notify admin on new user signup with approve/reject registration" do
@@ -379,6 +449,66 @@ describe SessionsController, type: :controller do
 
       expect(response).to redirect_to(root_path)
     end
+
+    it "switches a social account to a different social account if the authentication method changed" do
+      request.env["omniauth.auth"] = OmniAuth.config.mock_auth[:bn_launcher]
+      get :omniauth, params: { provider: 'bn_launcher' }
+
+      u = User.find_by(social_uid: "bn-launcher-user")
+      u.social_uid = nil
+      users_old_uid = u.uid
+      u.save!
+
+      new_user = OmniAuth::AuthHash.new(
+        provider: "bn_launcher",
+        uid: "bn-launcher-user-new",
+        info: {
+          email: "user@google.com",
+          name: "Office User",
+          nickname: "googleuser",
+          image: "touch.png",
+          customer: 'customer1',
+        }
+      )
+
+      allow_any_instance_of(SessionsController).to receive(:auth_changed_to_social?).and_return(true)
+      allow_any_instance_of(ApplicationController).to receive(:set_user_domain).and_return("customer1")
+      controller.instance_variable_set(:@user_domain, "customer1")
+
+      request.env["omniauth.auth"] = new_user
+      get :omniauth, params: { provider: 'bn_launcher' }
+
+      new_u = User.find_by(social_uid: "bn-launcher-user-new")
+      expect(users_old_uid).to eq(new_u.uid)
+    end
+
+    it "switches a local account to a different social account if the authentication method changed" do
+      email = Faker::Internet.email
+      user = create(:user, email: email, provider: "customer1")
+      users_old_uid = user.uid
+
+      new_user = OmniAuth::AuthHash.new(
+        provider: "bn_launcher",
+        uid: "bn-launcher-user-new",
+        info: {
+          email: email,
+          name: "Office User",
+          nickname: "googleuser",
+          image: "touch.png",
+          customer: 'customer1',
+        }
+      )
+
+      allow_any_instance_of(SessionsController).to receive(:auth_changed_to_social?).and_return(true)
+      allow_any_instance_of(ApplicationController).to receive(:set_user_domain).and_return("customer1")
+      controller.instance_variable_set(:@user_domain, "customer1")
+
+      request.env["omniauth.auth"] = new_user
+      get :omniauth, params: { provider: 'bn_launcher' }
+
+      new_u = User.find_by(social_uid: "bn-launcher-user-new")
+      expect(users_old_uid).to eq(new_u.uid)
+    end
   end
 
   describe "POST #ldap" do
@@ -392,7 +522,7 @@ describe SessionsController, type: :controller do
 
       post :ldap, params: {
         session: {
-          user: "test",
+          username: "test",
           password: 'password',
         },
       }
@@ -403,13 +533,86 @@ describe SessionsController, type: :controller do
       expect(@request.session[:user_id]).to eql(u.id)
     end
 
+    it "should defaults the users image to blank if actual image is provided" do
+      entry = Net::LDAP::Entry.new("cn=Test User,ou=people,dc=planetexpress,dc=com")
+      entry[:cn] = "Test User"
+      entry[:givenName] = "Test"
+      entry[:sn] = "User"
+      entry[:mail] = "test@example.com"
+      entry[:jpegPhoto] = "\FF\F8" # Pretend image
+      allow_any_instance_of(Net::LDAP).to receive(:bind_as).and_return([entry])
+
+      post :ldap, params: {
+        session: {
+          username: "test",
+          password: 'password',
+        },
+      }
+
+      u = User.last
+      expect(u.provider).to eql("ldap")
+      expect(u.image).to eql("")
+      expect(@request.session[:user_id]).to eql(u.id)
+    end
+
+    it "uses the users image if a url is provided" do
+      image = Faker::Internet.url
+      entry = Net::LDAP::Entry.new("cn=Test User,ou=people,dc=planetexpress,dc=com")
+      entry[:cn] = "Test User"
+      entry[:givenName] = "Test"
+      entry[:sn] = "User"
+      entry[:mail] = "test@example.com"
+      entry[:jpegPhoto] = image
+      allow_any_instance_of(Net::LDAP).to receive(:bind_as).and_return([entry])
+
+      post :ldap, params: {
+        session: {
+          username: "test",
+          password: 'password',
+        },
+      }
+
+      u = User.last
+      expect(u.provider).to eql("ldap")
+      expect(u.image).to eql(image)
+      expect(@request.session[:user_id]).to eql(u.id)
+    end
+
     it "should redirect to signin on invalid credentials" do
       allow_any_instance_of(Net::LDAP).to receive(:bind_as).and_return(false)
 
       post :ldap, params: {
         session: {
-          user: "test",
+          username: "test",
           password: 'passwor',
+        },
+      }
+
+      expect(response).to redirect_to(ldap_signin_path)
+      expect(flash[:alert]).to eq(I18n.t("invalid_credentials"))
+    end
+
+    it "redirects to signin if no password provided" do
+      allow_any_instance_of(Net::LDAP).to receive(:bind_as).and_return(false)
+
+      post :ldap, params: {
+        session: {
+          username: "test",
+          password: '',
+        },
+      }
+
+      expect(response).to redirect_to(ldap_signin_path)
+      expect(flash[:alert]).to eq(I18n.t("invalid_credentials"))
+    end
+
+    it "redirects to signin if no username provided" do
+      allow_any_instance_of(Net::LDAP).to receive(:bind_as).and_return(false)
+
+      post :ldap, params: {
+        session: {
+          username: "",
+          password: 'test',
         },
       }
 

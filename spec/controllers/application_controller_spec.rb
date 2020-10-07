@@ -43,7 +43,7 @@ describe ApplicationController do
     end
 
     it "redirects a banned user to a 401 and logs them out" do
-      @user.add_role :denied
+      @user.set_role :denied
       @request.session[:user_id] = @user.id
 
       get :index
@@ -53,7 +53,7 @@ describe ApplicationController do
     end
 
     it "redirects a pending user to a 401 and logs them out" do
-      @user.add_role :pending
+      @user.set_role :pending
       @request.session[:user_id] = @user.id
 
       get :index
@@ -82,13 +82,13 @@ describe ApplicationController do
 
   context "setters" do
     it "sets the user locale correctly" do
-      user = create(:user, language: "ru-RU")
+      user = create(:user, language: "ru")
 
-      expect(controller.user_locale(user)).to eql("ru_RU")
+      expect(controller.user_locale(user)).to eql("ru")
     end
 
     it "defaults to English locale if invalid language is set" do
-      user = create(:user, language: "ru")
+      user = create(:user, language: "asdasd")
 
       expect(controller.user_locale(user)).to eql("en")
     end

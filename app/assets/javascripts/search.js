@@ -23,7 +23,8 @@ $(document).on('turbolinks:load', function(){
       (controller == "rooms" && action == "update") ||
       (controller == "rooms" && action == "join") || 
       (controller == "users" && action == "recordings") ||
-      (controller == "admins" && action == "server_recordings")) {
+      (controller == "admins" && action == "server_recordings") ||
+      (controller == "admins" && action == "server_rooms")) {
     // Submit search if the user hits enter
     $("#search-input").keypress(function(key) {
       if (key.which == 13) {
@@ -69,10 +70,12 @@ function searchPage() {
 
   // Check if the user filtered by role
   var role = new URL(location.href).searchParams.get('role')
+  var tab = new URL(location.href).searchParams.get('tab')
 
   var url = window.location.pathname + "?page=1&search=" + search
 
   if (role) { url += "&role=" + role } 
+  if (tab) { url += "&tab=" + tab } 
 
   window.location.replace(addRecordingTable(url));
 }
@@ -80,12 +83,16 @@ function searchPage() {
 // Clears the search bar
 function clearSearch() {
   var role = new URL(location.href).searchParams.get('role')
+  var tab = new URL(location.href).searchParams.get('tab')
 
   var url = window.location.pathname + "?page=1"
 
   if (role) { url += "&role=" + role } 
+  if (tab) { url += "&tab=" + tab } 
   
   window.location.replace(addRecordingTable(url));
+
+  var search_params = new URLSearchParams(window.location.search)
 }
 
 function addRecordingTable(url) {

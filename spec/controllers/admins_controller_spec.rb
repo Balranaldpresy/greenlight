@@ -25,7 +25,7 @@ describe AdminsController, type: :controller do
 
     @user = create(:user, provider: "provider1")
     @admin = create(:user, provider: "provider1")
-    @admin.add_role :admin
+    @admin.set_role :admin
   end
 
   describe "User Roles" do
@@ -67,6 +67,8 @@ describe AdminsController, type: :controller do
 
         post :ban_user, params: { user_uid: @user.uid }
 
+        @user.reload
+
         expect(@user.has_role?(:denied)).to eq(true)
         expect(flash[:success]).to be_present
         expect(response).to redirect_to(admins_path)
@@ -76,11 +78,13 @@ describe AdminsController, type: :controller do
     context "POST #unban" do
       it "unbans the user from the application" do
         @request.session[:user_id] = @admin.id
-        @user.add_role :denied
+        @user.set_role :denied
 
         expect(@user.has_role?(:denied)).to eq(true)
 
         post :unban_user, params: { user_uid: @user.uid }
+
+        @user.reload
 
         expect(@user.has_role?(:denied)).to eq(false)
         expect(flash[:success]).to be_present
@@ -149,9 +153,11 @@ describe AdminsController, type: :controller do
       it "approves a pending user" do
         @request.session[:user_id] = @admin.id
 
-        @user.add_role :pending
+        @user.set_role :pending
 
         post :approve, params: { user_uid: @user.uid }
+
+        @user.reload
 
         expect(@user.has_role?(:pending)).to eq(false)
         expect(flash[:success]).to be_present
@@ -161,9 +167,116 @@ describe AdminsController, type: :controller do
       it "sends the user an email telling them theyre approved" do
         @request.session[:user_id] = @admin.id
 
-        @user.add_role :pending
+        @user.set_role :pending
         params = { user_uid: @user.uid }
         expect { post :approve, params: params }.to change { ActionMailer::Base.deliveries.count }.by(1)
+      end
+    end
+
+    context "POST #undelete" do
+      it "undeletes a user" do
+        @request.session[:user_id] = @admin.id
+
+        @user.delete
+
+        expect(User.find_by(uid: @user.uid)).to be_nil
+
+        post :undelete, params: { user_uid: @user.uid }
+
+        expect(User.find_by(uid: @user.uid)).to be_present
+        expect(flash[:success]).to be_present
+        expect(response).to redirect_to(admins_path)
+      end
+
+      it "undeletes the users rooms" do
+        @request.session[:user_id] = @admin.id
+
+        @user.main_room.delete
+        @user.delete
+
+        expect(Room.find_by(uid: @user.main_room.uid)).to be_nil
+
+        post :undelete, params: { user_uid: @user.uid }
+
+        expect(Room.find_by(uid: @user.main_room.uid)).to be_present
+        expect(flash[:success]).to be_present
+        expect(response).to redirect_to(admins_path)
+      end
+    end
+
+    context "POST #merge_user" do
+      it "merges the users room to the primary account and deletes the old user" do
+        @request.session[:user_id] = @admin.id
+
+        @user2 = create(:user)
+        room1 = create(:room, owner: @user2)
+        room2 = create(:room, owner: @user2)
+        room3 = @user2.main_room
+
+        post :merge_user, params: { user_uid: @user.uid, merge: @user2.uid }
+
+        room1.reload
+        room2.reload
+        room3.reload
+
+        expect(User.exists?(uid: @user2.uid)).to be false
+        expect(room1.name).to start_with("(Merged)")
+        expect(room2.name).to start_with("(Merged)")
+        expect(room3.name).to start_with("(Merged)")
+        expect(room1.owner).to eq(@user)
+        expect(room2.owner).to eq(@user)
+        expect(room3.owner).to eq(@user)
+        expect(flash[:success]).to be_present
+        expect(response).to redirect_to(admins_path)
+      end
+
+      it "does not merge if trying to merge the same user into themself" do
+        @request.session[:user_id] = @admin.id
+
+        post :merge_user, params: { user_uid: @user.uid, merge: @user.uid }
+
+        expect(flash[:alert]).to be_present
+        expect(response).to redirect_to(admins_path)
+      end
+    end
+
+    context "POST permissions" do
+      it "allows a user with the correct permission to manage users" do
+        Role.create_new_role("test", "greenlight").update_all_role_permissions(can_manage_users: true)
+
+        @user2 = create(:user)
+        @user2.set_role(:test)
+
+        # Random manage user action test
+
+        @request.session[:user_id] = @user2.id
+
+        expect(@user.has_role?(:denied)).to eq(false)
+
+        post :ban_user, params: { user_uid: @user.uid }
+
+        @user.reload
+
+        expect(@user.has_role?(:denied)).to eq(true)
+        expect(flash[:success]).to be_present
+        expect(response).to redirect_to(admins_path)
+      end
+
+      it "doesn't allow a user with the incorrect permission to manage users" do
+        Role.create_new_role("test", "greenlight").update_all_role_permissions(can_manage_users: false)
+
+        @user2 = create(:user)
+        @user2.set_role(:test)
+
+        # Random manage user action test
+
+        @request.session[:user_id] = @user2.id
+
+        expect(@user.has_role?(:denied)).to eq(false)
+
+        post :ban_user, params: { user_uid: @user.uid }
+
+        expect(response).to render_template "errors/greenlight_error"
       end
     end
   end
@@ -177,12 +290,46 @@ describe AdminsController, type: :controller do
         @request.session[:user_id] = @admin.id
         fake_image_url = "example.com"
 
-        post :update_settings, params: { setting: "Branding Image", value: fake_image_url }
+        post :update_settings, params: { setting: "Branding Image", value: fake_image_url, tab: "appearance" }
 
         feature = Setting.find_by(provider: "provider1").features.find_by(name: "Branding Image")
 
         expect(feature[:value]).to eq(fake_image_url)
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "appearance"))
+      end
+    end
+
+    context "POST #legal" do
+      it "changes the legal link on the page" do
+        allow(Rails.configuration).to receive(:loadbalanced_configuration).and_return(true)
+        allow_any_instance_of(User).to receive(:greenlight_account?).and_return(true)
+
+        @request.session[:user_id] = @admin.id
+        fake_url = "example.com"
+
+        post :update_settings, params: { setting: "Legal URL", value: fake_url, tab: "administration" }
+
+        feature = Setting.find_by(provider: "provider1").features.find_by(name: "Legal URL")
+
+        expect(feature[:value]).to eq(fake_url)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "administration"))
+      end
+    end
+
+    context "POST #privpolicy" do
+      it "changes the privacy policy on the page" do
+        allow(Rails.configuration).to receive(:loadbalanced_configuration).and_return(true)
+        allow_any_instance_of(User).to receive(:greenlight_account?).and_return(true)
+
+        @request.session[:user_id] = @admin.id
+        fake_url = "example.com"
+
+        post :update_settings, params: { setting: "Privacy Policy URL", value: fake_url, tab: "administration" }
+
+        feature = Setting.find_by(provider: "provider1").features.find_by(name: "Privacy Policy URL")
+
+        expect(feature[:value]).to eq(fake_url)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "administration"))
       end
     end
 
@@ -199,7 +346,7 @@ describe AdminsController, type: :controller do
         feature = Setting.find_by(provider: "provider1").features.find_by(name: "Primary Color")
 
         expect(feature[:value]).to eq(primary_color)
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "appearance"))
       end
 
       it "changes the primary-lighten on the page" do
@@ -209,12 +356,12 @@ describe AdminsController, type: :controller do
         @request.session[:user_id] = @admin.id
         primary_color = Faker::Color.hex_color
 
-        post :update_settings, params: { setting: "Primary Color Lighten", value: primary_color }
+        post :update_settings, params: { setting: "Primary Color Lighten", value: primary_color, tab: "appearance" }
 
         feature = Setting.find_by(provider: "provider1").features.find_by(name: "Primary Color Lighten")
 
         expect(feature[:value]).to eq(primary_color)
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "appearance"))
       end
 
       it "changes the primary-darken on the page" do
@@ -224,12 +371,12 @@ describe AdminsController, type: :controller do
         @request.session[:user_id] = @admin.id
         primary_color = Faker::Color.hex_color
 
-        post :update_settings, params: { setting: "Primary Color Darken", value: primary_color }
+        post :update_settings, params: { setting: "Primary Color Darken", value: primary_color, tab: "appearance" }
 
         feature = Setting.find_by(provider: "provider1").features.find_by(name: "Primary Color Darken")
 
         expect(feature[:value]).to eq(primary_color)
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "appearance"))
       end
     end
   end
@@ -249,7 +396,7 @@ describe AdminsController, type: :controller do
 
         expect(feature[:value]).to eq(Rails.configuration.registration_methods[:invite])
         expect(flash[:success]).to be_present
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "settings"))
       end
 
       it "does not allow the user to change to invite if emails are off" do
@@ -262,7 +409,7 @@ describe AdminsController, type: :controller do
         post :registration_method, params: { value: "invite" }
 
         expect(flash[:alert]).to be_present
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "settings"))
       end
     end
 
@@ -278,7 +425,7 @@ describe AdminsController, type: :controller do
         feature = Setting.find_by(provider: "provider1").features.find_by(name: "Room Authentication")
 
         expect(feature[:value]).to eq("true")
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "settings"))
       end
     end
 
@@ -294,7 +441,7 @@ describe AdminsController, type: :controller do
         feature = Setting.find_by(provider: "provider1").features.find_by(name: "Room Limit")
 
         expect(feature[:value]).to eq("5")
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "settings"))
       end
     end
 
@@ -310,7 +457,120 @@ describe AdminsController, type: :controller do
         feature = Setting.find_by(provider: "provider1").features.find_by(name: "Default Recording Visibility")
 
         expect(feature[:value]).to eq("public")
-        expect(response).to redirect_to(admin_site_settings_path)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "settings"))
+      end
+    end
+
+    context "POST #maintenance_banner" do
+      it "displays a banner with the maintenance string" do
+        allow(Rails.configuration).to receive(:loadbalanced_configuration).and_return(true)
+        allow_any_instance_of(User).to receive(:greenlight_account?).and_return(true)
+
+        @request.session[:user_id] = @admin.id
+        fake_banner_string = "Maintenance work at 2 pm"
+
+        post :update_settings, params: { setting: "Maintenance Banner", value: fake_banner_string, tab: "administration" }
+
+        feature = Setting.find_by(provider: "provider1").features.find_by(name: "Maintenance Banner")
+
+        expect(flash[:success]).to be_present
+        expect(feature[:value]).to eq(fake_banner_string)
+        expect(response).to redirect_to(admin_site_settings_path(tab: "administration"))
+      end
+    end
+
+    context "POST #shared_access" do
+      it "changes the shared access setting" do
+        allow(Rails.configuration).to receive(:loadbalanced_configuration).and_return(true)
+        allow_any_instance_of(User).to receive(:greenlight_account?).and_return(true)
+
+        @request.session[:user_id] = @admin.id
+
+        post :update_settings, params: { setting: "Shared Access", value: "false" }
+
+        feature = Setting.find_by(provider: "provider1").features.find_by(name: "Shared Access")
+
+        expect(feature[:value]).to eq("false")
+        expect(response).to redirect_to(admin_site_settings_path(tab: "settings"))
+      end
+    end
+
+    context "POST #clear_auth" do
+      it "clears all users social uids if clear auth button is clicked" do
+        allow_any_instance_of(ApplicationController).to receive(:set_user_domain).and_return("provider1")
+        controller.instance_variable_set(:@user_domain, "provider1")
+
+        @request.session[:user_id] = @admin.id
+
+        @admin.set_role :super_admin
+        @admin.update_attribute(:provider, "greenlight")
+        @user2 = create(:user, provider: "provider1")
+        @user3 = create(:user, provider: "provider1")
+
+        @user.update_attribute(:social_uid, Faker::Internet.password)
+        @user2.update_attribute(:social_uid, Faker::Internet.password)
+        @user3.update_attribute(:social_uid, Faker::Internet.password)
+
+        expect(@user.social_uid).not_to be(nil)
+        expect(@user2.social_uid).not_to be(nil)
+        expect(@user3.social_uid).not_to be(nil)
+
+        post :clear_auth
+
+        @user.reload
+        @user2.reload
+        @user3.reload
+
+        expect(@user.social_uid).to be(nil)
+        expect(@user2.social_uid).to be(nil)
+        expect(@user3.social_uid).to be(nil)
+      end
+    end
+
+    context "POST #log_level" do
+      it "changes the log level" do
+        @request.session[:user_id] = @admin.id
+
+        @admin.set_role :super_admin
+
+        expect(Rails.logger.level).to eq(0)
+        post :log_level, params: { value: 2 }
+        expect(Rails.logger.level).to eq(2)
+      end
+    end
+
+    context "POST permissions" do
+      it "allows a user with the correct permission to edit site settings" do
+        Role.create_new_role("test", "greenlight").update_all_role_permissions(can_edit_site_settings: true)
+
+        @user2 = create(:user)
+        @user2.set_role(:test)
+
+        # Random edit site settings action test
+
+        @request.session[:user_id] = @user2.id
+
+        post :update_settings, params: { setting: "Shared Access", value: "false" }
+
+        feature = Setting.find_by(provider: "provider1").features.find_by(name: "Shared Access")
+
+        expect(feature[:value]).to eq("false")
+        expect(response).to redirect_to(admin_site_settings_path(tab: "settings"))
+      end
+
+      it "doesn't allow a user with the incorrect permission to edit site settings" do
+        Role.create_new_role("test", "greenlight").update_all_role_permissions(can_manage_users: true)
+
+        @user2 = create(:user)
+        @user2.set_role(:test)
+
+        # Random edit site settings action test
+
+        @request.session[:user_id] = @user2.id
+
+        post :update_settings, params: { setting: "Shared Access", value: "false" }
+
+        expect(response).to render_template "errors/greenlight_error"
       end
     end
   end
@@ -382,6 +642,7 @@ describe AdminsController, type: :controller do
     context "PATCH #change_role_order" do
       before do
         Role.create_default_roles("provider1")
+        @user.roles.delete(Role.find_by(name: "user", provider: "greenlight"))
       end
 
       it "should fail if user attempts to change the order of the admin or user roles" do
@@ -397,37 +658,11 @@ describe AdminsController, type: :controller do
       end
 
       it "should fail if a user attempts to edit a role with a higher priority than their own" do
-        Role.create(name: "test1", priority: 1, provider: "greenlight")
-        new_role2 = Role.create(name: "test2", priority: 2, provider: "greenlight")
+        new_role3 = Role.create_new_role("test3", "provider1")
+        new_role2 = Role.create_new_role("test2", "provider1")
         new_role2.update_permission("can_edit_roles", "true")
-        new_role3 = Role.create(name: "test3", priority: 3, provider: "greenlight")
-        user_role = Role.find_by(name: "user", provider: "greenlight")
 
-        user_role.priority = 4
-        user_role.save!
-
-        @user.roles << new_role2
-        @user.save!
-
-        @request.session[:user_id] = @user.id
-
-        patch :change_role_order, params: { role: [new_role3.id, new_role2.id] }
-
-        expect(flash[:alert]).to eq(I18n.t("administrator.roles.invalid_order"))
-        expect(response).to redirect_to admin_roles_path
-      end
-
-      it "should fail if a user attempts to edit a role with a higher priority than their own" do
-        Role.create(name: "test1", priority: 1, provider: "greenlight")
-        new_role2 = Role.create(name: "test2", priority: 2, provider: "greenlight")
-        new_role2.update_permission("can_edit_roles", "true")
-        new_role3 = Role.create(name: "test3", priority: 3, provider: "greenlight")
-        user_role = Role.find_by(name: "user", provider: "greenlight")
-
-        user_role.priority = 4
-        user_role.save!
-
-        @user.roles << new_role2
+        @user.role = new_role2
         @user.save!
 
         @request.session[:user_id] = @user.id
@@ -439,10 +674,11 @@ describe AdminsController, type: :controller do
       end
 
       it "should update the role order" do
+        user_role = Role.find_by(name: "user", provider: "provider1")
+        user_role.update_attribute(:priority, 4)
         new_role1 = Role.create(name: "test1", priority: 1, provider: "provider1")
         new_role2 = Role.create(name: "test2", priority: 2, provider: "provider1")
         new_role3 = Role.create(name: "test3", priority: 3, provider: "provider1")
-        user_role = Role.find_by(name: "user", provider: "provider1")
 
         @request.session[:user_id] = @admin.id
 
@@ -463,18 +699,17 @@ describe AdminsController, type: :controller do
     context 'POST #update_role' do
       before do
         Role.create_default_roles("provider1")
+        @user.roles.delete(Role.find_by(name: "user", provider: "greenlight"))
       end
 
       it "should fail to update a role with a lower priority than the user" do
+        user_role = Role.find_by(name: "user", provider: "provider1")
+        user_role.update_attribute(:priority, 3)
         new_role1 = Role.create(name: "test1", priority: 1, provider: "provider1")
         new_role2 = Role.create(name: "test2", priority: 2, provider: "provider1")
         new_role2.update_permission("can_edit_roles", "true")
-        user_role = Role.find_by(name: "user", provider: "greenlight")
 
-        user_role.priority = 3
-        user_role.save!
-
-        @user.roles << new_role2
+        @user.role = new_role2
         @user.save!
 
         @request.session[:user_id] = @user.id
@@ -486,7 +721,7 @@ describe AdminsController, type: :controller do
       end
 
       it "should fail to update if there is a duplicate name" do
-        new_role = Role.create(name: "test2", priority: 1, provider: "provider1")
+        new_role = Role.create(name: "test2", priority: 2, provider: "provider1")
         new_role.update_permission("can_edit_roles", "true")
 
         @request.session[:user_id] = @admin.id
@@ -498,7 +733,7 @@ describe AdminsController, type: :controller do
       end
 
       it "should update role permisions" do
-        new_role = Role.create(name: "test2", priority: 1, provider: "provider1")
+        new_role = Role.create(name: "test2", priority: 2, provider: "provider1")
         new_role.update_permission("can_edit_roles", "true")
 
         @request.session[:user_id] = @admin.id
@@ -513,6 +748,24 @@ describe AdminsController, type: :controller do
         expect(new_role.get_permission("can_manage_users")).to eq(true)
         expect(new_role.get_permission("send_promoted_email")).to eq(false)
         expect(response).to redirect_to admin_roles_path(selected_role: new_role.id)
+      end
+
+      it "creates the users home room if can_create_rooms is enabled" do
+        new_role = Role.create(name: "test2", priority: 2, provider: "provider1")
+        new_role.update_permission("can_create_rooms", "false")
+
+        @request.session[:user_id] = @admin.id
+
+        new_user = create(:user, role: new_role)
+        expect(new_user.role.get_permission("can_create_rooms")).to eq(false)
+        expect(new_user.main_room).to be_nil
+
+        patch :update_role, params: { role_id: new_role.id, role: { name: "test", can_create_rooms: true,
+          colour: "#45434" } }
+
+        new_user.reload
+        expect(new_user.role.get_permission("can_create_rooms")).to eq(true)
+        expect(new_user.main_room).not_to be_nil
       end
     end
 
@@ -543,7 +796,7 @@ describe AdminsController, type: :controller do
       end
 
       it "should successfully delete the role" do
-        new_role = Role.create(name: "test2", priority: 1, provider: "provider1")
+        new_role = Role.create(name: "test2", priority: 2, provider: "provider1")
         new_role.update_permission("can_edit_roles", "true")
 
         @request.session[:user_id] = @admin.id
@@ -552,6 +805,48 @@ describe AdminsController, type: :controller do
 
         expect(Role.where(name: "test2", provider: "provider1").count).to eq(0)
         expect(response).to redirect_to admin_roles_path
+      end
+    end
+
+    context "POST permissions" do
+      it "allows a user with the correct permission to edit roles" do
+        Role.create_new_role("test", "greenlight").update_all_role_permissions(can_edit_roles: true)
+
+        @user2 = create(:user)
+        @user2.set_role(:test)
+
+        # Random edit roles action test
+
+        new_role = Role.create(name: "test2", priority: 2, provider: "provider1")
+        new_role.update_permission("can_edit_roles", "true")
+
+        @request.session[:user_id] = @user2.id
+
+        patch :update_role, params: { role_id: new_role.id, role: { name: "test3", can_edit_roles: false,
+          colour: "#45434", can_manage_users: true } }
+
+        new_role.reload
+        expect(new_role.name).to eq("test3")
+        expect(response).to redirect_to admin_roles_path(selected_role: new_role.id)
+      end
+
+      it "doesn't allow a user with the incorrect permission to edit roles" do
+        Role.create_new_role("test", "greenlight").update_all_role_permissions(can_manage_users: false)
+
+        @user2 = create(:user)
+        @user2.set_role(:test)
+
+        # Random edit roles action test
+
+        new_role = Role.create(name: "test2", priority: 2, provider: "provider1")
+        new_role.update_permission("can_edit_roles", "true")
+
+        @request.session[:user_id] = @user2.id
+
+        patch :update_role, params: { role_id: new_role.id, role: { name: "test3", can_edit_roles: false,
+          colour: "#45434", can_manage_users: true } }
+
+        expect(response).to render_template "errors/greenlight_error"
       end
     end
   end
