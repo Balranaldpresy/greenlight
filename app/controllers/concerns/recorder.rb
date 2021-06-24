@@ -37,7 +37,7 @@ module Recorder
   def all_recordings(room_bbb_ids, search_params = {}, ret_search_params = false, search_name = false)
     res = { recordings: [] }
 
-    until room_bbb_ids.empty?
+    until room_bbb_ids.empty? || res[:recordings].length > Rails.configuration.pagination_number
       # bbb.get_recordings returns an object
       # take only the array portion of the object that is returned
       full_res = get_multiple_recordings(room_bbb_ids.pop(Rails.configuration.pagination_number))
@@ -120,6 +120,15 @@ module Recorder
       recs
     else
       recs.reverse
+    end
+  end
+
+  def perm_to_record_meeting
+    # define perm without init config of room setting
+    if recording_consent_required?
+      @settings.get_value("Room Configuration Recording") != "disabled" && current_user&.role&.get_permission("can_launch_recording")
+    else
+      current_user&.role&.get_permission("can_launch_recording")
     end
   end
 
